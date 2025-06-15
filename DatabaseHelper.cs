@@ -397,7 +397,64 @@ namespace cvsimporter
             }
             return result;
         }
+
+
+        public static List<PaymentInfo> GetAllPayments(string databasePath)
+        {
+            var result = new List<PaymentInfo>();
+            using var connection = new SqliteConnection($"Data Source={databasePath}");
+            connection.Open();
+            var cmd = new SqliteCommand(@"
+        SELECT c.FirstName || ' ' || c.LastName AS CustomerName, c.CustomerID, i.Instrument, p.PaymentDate, p.Amount
+        FROM Payments p
+        JOIN Rentals r ON p.RentalID = r.RentalID
+        JOIN Customers c ON r.CustomerID = c.CustomerID
+        JOIN Instruments i ON r.SerialNumber = i.SerialNumber
+        ORDER BY p.PaymentDate DESC
+    ", connection);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                result.Add(new PaymentInfo
+                {
+                    CustomerName = reader.GetString(0),
+                    CustomerId = reader.GetInt32(1),
+                    Instrument = reader.GetString(2),
+                    PaymentDate = reader.GetDateTime(3),
+                    Amount = reader.GetDecimal(4)
+                });
+            }
+            return result;
+        }
+        public static List<MultipleRentalCustomer> GetCustomersWithMultipleRentals(string databasePath)
+        {
+            var result = new List<MultipleRentalCustomer>();
+            using var connection = new SqliteConnection($"Data Source={databasePath}");
+            connection.Open();
+            var cmd = new SqliteCommand(@"
+        SELECT c.FirstName || ' ' || c.LastName AS CustomerName, c.CustomerID, COUNT(r.SerialNumber) AS InstrumentCount
+        FROM Rentals r
+        JOIN Customers c ON r.CustomerID = c.CustomerID
+        GROUP BY c.CustomerID, c.FirstName, c.LastName
+        HAVING COUNT(r.SerialNumber) > 1
+        ORDER BY CustomerName
+    ", connection);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                result.Add(new MultipleRentalCustomer
+                {
+                    CustomerName = reader.GetString(0),
+                    CustomerId = reader.GetInt32(1),
+                    InstrumentCount = reader.GetInt32(2)
+                });
+            }
+            return result;
+        }
     }
+
+
+
 
     public class OutstandingPaymentInfo
     {
@@ -409,5 +466,14 @@ namespace cvsimporter
         public decimal InsgesamtBezahlt { get; set; }
         public int AnzahlZahlungen { get; set; }
         public decimal ErwarteteZahlungen { get; set; } // NEU
+    }
+
+    public class PaymentInfo
+    {
+        public string CustomerName { get; set; }
+        public int CustomerId { get; set; }
+        public string Instrument { get; set; }
+        public DateTime PaymentDate { get; set; }
+        public decimal Amount { get; set; }
     }
 }
