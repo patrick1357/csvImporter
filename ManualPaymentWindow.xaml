@@ -1,0 +1,21 @@
+﻿<Window x:Class="cvsimporter.ManualPaymentWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Zahlung manuell eintragen" Height="500" Width="500">
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto">
+        <StackPanel Margin="20">
+            <TextBlock Text="Kunde suchen (Name, Kundennr., Bestellnr.):"/>
+            <TextBox x:Name="txtSearch" Margin="0,0,0,10" TextChanged="txtSearch_TextChanged"/>
+            <ListBox x:Name="lstCustomers" Height="80" DisplayMemberPath="Display" SelectionChanged="lstCustomers_SelectionChanged"/>
+            <TextBlock Text="Miete auswählen:" Margin="0,10,0,0"/>
+            <ListBox x:Name="lstRentals" Height="60" DisplayMemberPath="Display"/>
+            <TextBlock Text="Betrag:" Margin="0,10,0,0"/>
+            <TextBox x:Name="txtAmount"/>
+            <TextBlock Text="Belegnummer:" Margin="0,10,0,0"/>
+            <TextBox x:Name="txtReceiptNumber"/>
+            <TextBlock Text="Zahlungsdatum:" Margin="0,10,0,0"/>
+            <DatePicker x:Name="dpDate"/>
+            <Button Content="Zahlung speichern" Margin="0,20,0,0" Click="btnSave_Click"/>
+        </StackPanel>
+    </ScrollViewer>
+</Window>

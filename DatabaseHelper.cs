@@ -4,6 +4,7 @@ using System;
 using System.Globalization;
 using System.IO;
 using System.Windows;
+using System.Collections.Generic;
 
 namespace cvsimporter
 {
@@ -17,12 +18,13 @@ namespace cvsimporter
             using var connection = new SqliteConnection($"Data Source={path}");
             connection.Open();
 
-            // Customers
+            // Customers (mit Email)
             var createCustomersTable = @"
                 CREATE TABLE IF NOT EXISTS Customers (
                     CustomerID INTEGER PRIMARY KEY,
                     FirstName VARCHAR(100),
-                    LastName VARCHAR(100)
+                    LastName VARCHAR(100),
+                    Email VARCHAR(255) -- NEU
                 );";
             using (var cmd = new SqliteCommand(createCustomersTable, connection))
             {
@@ -40,7 +42,7 @@ namespace cvsimporter
                 cmd.ExecuteNonQuery();
             }
 
-            // Rentals (jetzt mit RentalPrice und RentalStart)
+            // Rentals (mit IsEnded, EndDate, OrderNumber)
             var createRentalsTable = @"
                 CREATE TABLE IF NOT EXISTS Rentals (
                     RentalID INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,6 +51,9 @@ namespace cvsimporter
                     RentalStart DATE,
                     RentalEnd DATE,
                     RentalPrice DECIMAL(10, 2),
+                    IsEnded BOOLEAN DEFAULT 0, -- NEU
+                    EndDate DATE,              -- NEU
+                    OrderNumber VARCHAR(50),   -- NEU, kann NULL sein
                     FOREIGN KEY (CustomerID) REFERENCES Customers(CustomerID),
                     FOREIGN KEY (SerialNumber) REFERENCES Instruments(SerialNumber)
                 );";
@@ -90,11 +95,26 @@ namespace cvsimporter
                 CREATE TABLE IF NOT EXISTS Payments (
                     PaymentID INTEGER PRIMARY KEY AUTOINCREMENT,
                     RentalID INTEGER,
+                    ReceiptNumber VARCHAR(50), -- NEU, kann NULL sein
                     PaymentDate DATE,
                     Amount DECIMAL(10, 2),
                     FOREIGN KEY (RentalID) REFERENCES Rentals(RentalID)
                 );";
             using (var cmd = new SqliteCommand(createPaymentsTable, connection))
+            {
+                cmd.ExecuteNonQuery();
+            }
+
+            // RentalComments (NEU: Mehrere Kommentare pro Miete)
+            var createRentalCommentsTable = @"
+                CREATE TABLE IF NOT EXISTS RentalComments (
+                    CommentID INTEGER PRIMARY KEY AUTOINCREMENT,
+                    RentalID INTEGER,
+                    Comment TEXT,
+                    CreatedAt DATE DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (RentalID) REFERENCES Rentals(RentalID)
+                );";
+            using (var cmd = new SqliteCommand(createRentalCommentsTable, connection))
             {
                 cmd.ExecuteNonQuery();
             }
@@ -325,79 +345,60 @@ namespace cvsimporter
             using var connection = new SqliteConnection($"Data Source={databasePath}");
             connection.Open();
 
-            var rentalsCmd = @"
-                SELECT r.RentalID, r.CustomerID, r.SerialNumber, r.RentalStart, r.RentalPrice,
-                       c.FirstName, c.LastName, i.Instrument
-                FROM Rentals r
-                JOIN Customers c ON r.CustomerID = c.CustomerID
-                JOIN Instruments i ON r.SerialNumber = i.SerialNumber
-            ";
-            using var cmd = new SqliteCommand(rentalsCmd, connection);
+            var sql = @"
+        SELECT
+            r.RentalID,
+            r.CustomerID,
+            c.FirstName || ' ' || c.LastName AS CustomerName,
+            i.Instrument,
+            r.RentalStart,
+            r.RentalPrice,
+            SUM(CASE WHEN p.PaymentDate <= $BisDatum THEN p.Amount ELSE 0 END) AS Paid,
+            MAX(CASE WHEN p.PaymentDate <= $BisDatum THEN p.PaymentDate ELSE NULL END) AS LastPaymentDate,
+            COUNT(CASE WHEN p.PaymentDate <= $BisDatum THEN 1 ELSE NULL END) AS PaymentCount
+        FROM Rentals r
+        JOIN Customers c ON r.CustomerID = c.CustomerID
+        JOIN Instruments i ON r.SerialNumber = i.SerialNumber
+        LEFT JOIN Payments p ON r.RentalID = p.RentalID
+        GROUP BY r.RentalID, r.CustomerID, c.FirstName, c.LastName, i.Instrument, r.RentalStart, r.RentalPrice
+    ";
+
+            using var cmd = new SqliteCommand(sql, connection);
+            cmd.Parameters.AddWithValue("$BisDatum", bisDatum);
+
             using var reader = cmd.ExecuteReader();
-            var rentals = new List<(long RentalID, int CustomerID, string FirstName, string LastName, string Instrument, string SerialNumber, DateTime RentalStart, decimal RentalPrice)>();
             while (reader.Read())
             {
-                rentals.Add((
-                    reader.GetInt64(0),
-                    reader.GetInt32(1),
-                    reader.GetString(5) + " " + reader.GetString(6),
-                    reader.GetString(5),
-                    reader.GetString(7),
-                    reader.GetString(2),
-                    reader.GetDateTime(3),
-                    reader.GetDecimal(4)
-                ));
-            }
-            reader.Close();
-
-            foreach (var rental in rentals)
-            {
-                int months = ((bisDatum.Year - rental.RentalStart.Year) * 12 + bisDatum.Month - rental.RentalStart.Month) + 1;
+                var rentalStart = reader.GetDateTime(4);
+                int months = ((bisDatum.Year - rentalStart.Year) * 12 + bisDatum.Month - rentalStart.Month) + 1;
                 if (months < 1) continue;
-                decimal expected = months * rental.RentalPrice;
+                decimal expected = months * reader.GetDecimal(5);
 
-                // Summe und Anzahl aller Zahlungen bis bisDatum
-                var sumCmd = new SqliteCommand(
-                    "SELECT SUM(Amount), MAX(PaymentDate), COUNT(*) FROM Payments WHERE RentalID = $RentalID AND PaymentDate <= $BisDatum",
-                    connection);
-                sumCmd.Parameters.AddWithValue("$RentalID", rental.RentalID);
-                sumCmd.Parameters.AddWithValue("$BisDatum", bisDatum);
-
-                decimal paid = 0;
+                decimal paid = !reader.IsDBNull(6) ? reader.GetDecimal(6) : 0;
                 string letzterMonat = "-";
-                int anzahlZahlungen = 0;
-                using (var sumReader = sumCmd.ExecuteReader())
+                if (!reader.IsDBNull(7))
                 {
-                    if (sumReader.Read())
-                    {
-                        paid = !sumReader.IsDBNull(0) ? sumReader.GetDecimal(0) : 0;
-                        if (!sumReader.IsDBNull(1))
-                        {
-                            var dt = sumReader.GetDateTime(1);
-                            letzterMonat = dt.ToString("MM.yyyy");
-                        }
-                        anzahlZahlungen = !sumReader.IsDBNull(2) ? sumReader.GetInt32(2) : 0;
-                    }
+                    letzterMonat = reader.GetDateTime(7).ToString("MM.yyyy");
                 }
+                int anzahlZahlungen = !reader.IsDBNull(8) ? reader.GetInt32(8) : 0;
 
                 if (paid < expected)
                 {
                     result.Add(new OutstandingPaymentInfo
                     {
-                        CustomerName = rental.FirstName,
-                        CustomerId = rental.CustomerID,
-                        Instrument = rental.Instrument,
+                        CustomerName = reader.GetString(2),
+                        CustomerId = reader.GetInt32(1),
+                        Instrument = reader.GetString(3),
                         OffenerBetrag = expected - paid,
                         LetzterZahlungsmonat = letzterMonat,
                         InsgesamtBezahlt = paid,
                         AnzahlZahlungen = anzahlZahlungen,
-                        ErwarteteZahlungen = expected // NEU
+                        ErwarteteZahlungen = expected
                     });
                 }
             }
             return result;
         }
-
 
         public static List<PaymentInfo> GetAllPayments(string databasePath)
         {
@@ -405,7 +406,7 @@ namespace cvsimporter
             using var connection = new SqliteConnection($"Data Source={databasePath}");
             connection.Open();
             var cmd = new SqliteCommand(@"
-        SELECT c.FirstName || ' ' || c.LastName AS CustomerName, c.CustomerID, i.Instrument, p.PaymentDate, p.Amount
+        SELECT c.FirstName || ' ' || c.LastName AS CustomerName, c.CustomerID, i.Instrument, p.PaymentDate, p.Amount, p.ReceiptNumber
         FROM Payments p
         JOIN Rentals r ON p.RentalID = r.RentalID
         JOIN Customers c ON r.CustomerID = c.CustomerID
@@ -421,11 +422,13 @@ namespace cvsimporter
                     CustomerId = reader.GetInt32(1),
                     Instrument = reader.GetString(2),
                     PaymentDate = reader.GetDateTime(3),
-                    Amount = reader.GetDecimal(4)
+                    Amount = reader.GetDecimal(4),
+                    ReceiptNumber = reader.IsDBNull(5) ? null : reader.GetString(5)
                 });
             }
             return result;
         }
+
         public static List<MultipleRentalCustomer> GetCustomersWithMultipleRentals(string databasePath)
         {
             var result = new List<MultipleRentalCustomer>();
@@ -451,29 +454,399 @@ namespace cvsimporter
             }
             return result;
         }
-    }
+
+        public static List<CustomerInfo> SearchCustomers(string databasePath, string search)
+        {
+            var result = new List<CustomerInfo>();
+            using var connection = new SqliteConnection($"Data Source={databasePath}");
+            connection.Open();
+            var cmd = new SqliteCommand(@"
+        SELECT CustomerID, FirstName, LastName FROM Customers
+        WHERE LOWER(FirstName) LIKE $search OR LOWER(LastName) LIKE $search OR CAST(CustomerID AS TEXT) LIKE $search
+        OR CustomerID IN (SELECT CustomerID FROM Rentals WHERE OrderNumber LIKE $search)
+    ", connection);
+            cmd.Parameters.AddWithValue("$search", $"%{search}%");
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                result.Add(new CustomerInfo
+                {
+                    CustomerId = reader.GetInt32(0),
+                    Display = $"{reader.GetString(1)} {reader.GetString(2)} (ID: {reader.GetInt32(0)})"
+                });
+            }
+            return result;
+        }
 
 
 
+        public static bool InvoiceNumberExists(string databasePath, string invoiceNumber)
+        {
+            using var connection = new SqliteConnection($"Data Source={databasePath}");
+            connection.Open();
+            var cmd = new SqliteCommand("SELECT COUNT(*) FROM Invoices WHERE InvoiceID = $invoiceNumber", connection);
+            cmd.Parameters.AddWithValue("$invoiceNumber", invoiceNumber);
+            return Convert.ToInt32(cmd.ExecuteScalar()) > 0;
+        }
 
-    public class OutstandingPaymentInfo
-    {
-        public string CustomerName { get; set; }
-        public int CustomerId { get; set; }
-        public string Instrument { get; set; }
-        public decimal OffenerBetrag { get; set; }
-        public string LetzterZahlungsmonat { get; set; }
-        public decimal InsgesamtBezahlt { get; set; }
-        public int AnzahlZahlungen { get; set; }
-        public decimal ErwarteteZahlungen { get; set; } // NEU
-    }
+        public static void InsertManualPayment(string databasePath, int rentalId, DateTime paymentDate, decimal amount, string receiptNumber)
+        {
+            using var connection = new SqliteConnection($"Data Source={databasePath}");
+            connection.Open();
 
-    public class PaymentInfo
-    {
-        public string CustomerName { get; set; }
-        public int CustomerId { get; set; }
-        public string Instrument { get; set; }
-        public DateTime PaymentDate { get; set; }
-        public decimal Amount { get; set; }
+            if (!string.IsNullOrWhiteSpace(receiptNumber))
+            {
+                // Prüfe, ob die Belegnummer bereits existiert
+                var checkCmd = new SqliteCommand(@"
+            SELECT c.FirstName || ' ' || c.LastName AS CustomerName, p.PaymentDate
+            FROM Payments p
+            JOIN Rentals r ON p.RentalID = r.RentalID
+            JOIN Customers c ON r.CustomerID = c.CustomerID
+            WHERE p.ReceiptNumber = $ReceiptNumber
+            LIMIT 1
+        ", connection);
+                checkCmd.Parameters.AddWithValue("$ReceiptNumber", receiptNumber);
+
+                using var reader = checkCmd.ExecuteReader();
+                if (reader.Read())
+                {
+                    string customerName = reader.GetString(0);
+                    DateTime existingDate = reader.GetDateTime(1);
+                    MessageBox.Show(
+                        $"Die Belegnummer '{receiptNumber}' existiert bereits bei Kunde '{customerName}'. Zahldatum {existingDate:dd.MM.yyyy}.",
+                        "Belegnummer bereits vorhanden",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Warning
+                    );
+                    return;
+                }
+            }
+
+            // Einfügen, wenn die Belegnummer noch nicht existiert
+            var cmd = new SqliteCommand(@"
+        INSERT INTO Payments (RentalID, PaymentDate, Amount, ReceiptNumber)
+        VALUES ($RentalID, $PaymentDate, $Amount, $ReceiptNumber)", connection);
+            cmd.Parameters.AddWithValue("$RentalID", rentalId);
+            cmd.Parameters.AddWithValue("$PaymentDate", paymentDate);
+            cmd.Parameters.AddWithValue("$Amount", amount);
+            cmd.Parameters.AddWithValue("$ReceiptNumber", receiptNumber ?? (object)DBNull.Value);
+            cmd.ExecuteNonQuery();
+        }
+        public static List<RentalInfo> GetRentalsForCustomer(string databasePath, int customerId)
+        {
+            using (var connection = new SqliteConnection($"Data Source={databasePath}"))
+            {
+                connection.Open();
+                var rentals = new List<RentalInfo>();
+                using (var command = connection.CreateCommand())
+                {
+                    command.CommandText = @"
+                SELECT r.RentalID, i.Instrument, r.RentalStart, r.EndDate
+                FROM Rentals r
+                JOIN Instruments i ON r.SerialNumber = i.SerialNumber
+                WHERE r.CustomerID = @CustomerID";
+                    command.Parameters.AddWithValue("@CustomerID", customerId);
+
+                    using (var reader = command.ExecuteReader())
+                    {
+                        while (reader.Read())
+                        {
+                            rentals.Add(new RentalInfo
+                            {
+                                RentalID = reader.GetInt32(0),
+                                Instrument = reader.GetString(1),
+                                StartDate = reader.GetDateTime(2),
+                                EndDate = reader.IsDBNull(3) ? (DateTime?)null : reader.GetDateTime(3)
+                            });
+                        }
+                    }
+                }
+                return rentals;
+            }
+        }
+        public static List<AllRentalInfo> GetAllRentalsWithOutstanding(string databasePath)
+        {
+            var result = new List<AllRentalInfo>();
+            using var connection = new SqliteConnection($"Data Source={databasePath}");
+            connection.Open();
+
+            var sql = @"
+        SELECT
+            r.RentalID,
+            c.FirstName || ' ' || c.LastName AS CustomerName,
+            c.CustomerID,
+            r.OrderNumber,
+            r.RentalStart,
+            r.EndDate,
+            r.IsEnded,
+            r.RentalPrice,
+            IFNULL(SUM(p.Amount), 0) AS Paid
+        FROM Rentals r
+        JOIN Customers c ON r.CustomerID = c.CustomerID
+        LEFT JOIN Payments p ON r.RentalID = p.RentalID
+        GROUP BY r.RentalID, c.FirstName, c.LastName, c.CustomerID, r.OrderNumber, r.RentalStart, r.EndDate, r.IsEnded, r.RentalPrice
+    ";
+
+            using var cmd = new SqliteCommand(sql, connection);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                var rentalStart = reader.GetDateTime(4);
+                var rentalPrice = reader.GetDecimal(7);
+                var months = ((DateTime.Now.Year - rentalStart.Year) * 12 + DateTime.Now.Month - rentalStart.Month) + 1;
+                if (months < 1) months = 0;
+                var expected = months * rentalPrice;
+                var paid = !reader.IsDBNull(8) ? reader.GetDecimal(8) : 0;
+                result.Add(new AllRentalInfo
+                {
+                    CustomerName = reader.GetString(1),
+                    CustomerId = reader.GetInt32(2),
+                    OrderNumber = reader.IsDBNull(3) ? null : reader.GetString(3),
+                    RentalStart = rentalStart,
+                    RentalEnd = reader.IsDBNull(5) ? (DateTime?)null : reader.GetDateTime(5),
+                    IsEnded = reader.GetBoolean(6),
+                    OffeneZahlungen = expected - paid
+                });
+            }
+            return result;
+
+        }
+        public static void ImportCsvPaymentsWithOrderNumber(Window owner, string databasePath, string csvPath)
+        {
+            var lines = File.ReadAllLines(csvPath);
+            if (lines.Length < 3) return; // Header überspringen
+
+            using var connection = new SqliteConnection($"Data Source={databasePath}");
+            connection.Open();
+            using var transaction = connection.BeginTransaction();
+
+            int imported = 0;
+            int skipped = 0;
+            int alreadyExists = 0;
+            int noRental = 0;
+            int userSkipped = 0;
+            List<string> details = new();
+
+            for (int i = 2; i < lines.Length; i++)
+            {
+                var parts = lines[i].Split(',');
+                if (parts.Length < 10)
+                {
+                    skipped++;
+                    details.Add($"Zeile {i + 1}: Zu wenig Spalten.");
+                    continue;
+                }
+
+                string datumStr = parts[0].Trim();
+                string kundenNrStr = parts[1].Trim();
+                string bestellNr = parts[2].Trim();
+                string belegNr = parts[4].Trim();
+                string name = parts[7].Trim();
+                string betragStr = parts[9].Replace("\"", "").Replace("€", "").Trim();
+
+                if (!int.TryParse(kundenNrStr, out int kundenNr))
+                {
+                    skipped++;
+                    details.Add($"Zeile {i + 1}: Ungültige Kundennummer.");
+                    continue;
+                }
+                if (!DateTime.TryParseExact(datumStr, "dd.MM.yyyy", CultureInfo.InvariantCulture, DateTimeStyles.None, out DateTime zahlungsDatum))
+                {
+                    skipped++;
+                    details.Add($"Zeile {i + 1}: Ungültiges Zahlungsdatum.");
+                    continue;
+                }
+                if (!decimal.TryParse(betragStr, NumberStyles.Any, CultureInfo.InvariantCulture, out decimal betrag))
+                {
+                    skipped++;
+                    details.Add($"Zeile {i + 1}: Ungültiger Betrag.");
+                    continue;
+                }
+
+                // 1. Suche Miete per Bestellnummer
+                int? rentalId = null;
+                if (!string.IsNullOrWhiteSpace(bestellNr))
+                {
+                    var cmd = new SqliteCommand("SELECT RentalID FROM Rentals WHERE OrderNumber = $OrderNumber", connection, transaction);
+                    cmd.Parameters.AddWithValue("$OrderNumber", bestellNr);
+                    var result = cmd.ExecuteScalar();
+                    if (result != null && result != DBNull.Value)
+                    {
+                        rentalId = Convert.ToInt32(result);
+                    }
+                }
+
+                // 2. Wenn keine Miete gefunden, suche alle Mieten zum Kunden
+                if (rentalId == null)
+                {
+                    var cmd = new SqliteCommand(
+                        @"SELECT RentalID, OrderNumber, RentalStart, EndDate, 
+                (SELECT Instrument FROM Instruments WHERE SerialNumber = r.SerialNumber) 
+                AS Instrument, RentalPrice
+                FROM Rentals r 
+                WHERE CustomerID = $CustomerID",
+                        connection, transaction);
+                    cmd.Parameters.AddWithValue("$CustomerID", kundenNr);
+                    var reader = cmd.ExecuteReader();
+                    var mieten = new List<(int RentalID, string OrderNumber, DateTime RentalStart, DateTime? EndDate, string Instrument, decimal RentalPrice)>();
+                    while (reader.Read())
+                    {
+                        mieten.Add((
+                            reader.GetInt32(0),
+                            reader.IsDBNull(1) ? null : reader.GetString(1),
+                            reader.GetDateTime(2),
+                            reader.IsDBNull(3) ? (DateTime?)null : reader.GetDateTime(3),
+                            reader.IsDBNull(4) ? "" : reader.GetString(4),
+                            reader.GetDecimal(5)
+                        ));
+                    }
+                    reader.Close();
+
+                    if (mieten.Count == 0)
+                    {
+                        noRental++;
+                        details.Add($"Zeile {i + 1}: Keine Miete für Kunde {kundenNr} gefunden.");
+                        continue;
+                    }
+                    else if (mieten.Count == 1)
+                    {
+                        rentalId = mieten[0].RentalID;
+                        // Falls Bestellnummer in CSV vorhanden, aber nicht in DB, jetzt speichern
+                        if (!string.IsNullOrWhiteSpace(bestellNr) && string.IsNullOrWhiteSpace(mieten[0].OrderNumber))
+                        {
+                            var updateCmd = new SqliteCommand("UPDATE Rentals SET OrderNumber = $OrderNumber WHERE RentalID = $RentalID", connection, transaction);
+                            updateCmd.Parameters.AddWithValue("$OrderNumber", bestellNr);
+                            updateCmd.Parameters.AddWithValue("$RentalID", rentalId.Value);
+                            updateCmd.ExecuteNonQuery();
+                        }
+                    }
+                    else if (mieten.Count > 1)
+                    {
+                        // Auswahlfenster anzeigen
+                        var auswahl = new SelectRentalWindow(mieten, bestellNr, name, zahlungsDatum, betrag, belegNr);
+                        if (auswahl.ShowDialog() == true)
+                        {
+                            if (auswahl.SplitPayment && auswahl.SelectedRentalIds != null && auswahl.SelectedRentalIds.Any())
+                            {
+                                foreach (var rid in auswahl.SelectedRentalIds)
+                                {
+                                    var mietpreis = mieten.First(x => x.RentalID == rid).RentalPrice;
+
+                                    // Prüfe, ob Zahlung mit dieser Belegnummer für diese Miete schon existiert
+                                    var checkCmd = new SqliteCommand(
+                                        "SELECT COUNT(*) FROM Payments WHERE RentalID = $RentalID AND ReceiptNumber = $ReceiptNumber",
+                                        connection, transaction);
+                                    checkCmd.Parameters.AddWithValue("$RentalID", rid);
+                                    checkCmd.Parameters.AddWithValue("$ReceiptNumber", string.IsNullOrWhiteSpace(belegNr) ? (object)DBNull.Value : belegNr);
+                                    var exists = Convert.ToInt32(checkCmd.ExecuteScalar()) > 0;
+                                    if (exists)
+                                    {
+                                        alreadyExists++;
+                                        details.Add($"Zeile {i + 1}: Zahlung für Miete {rid} mit Belegnummer {belegNr} existiert bereits.");
+                                        continue;
+                                    }
+
+                                    var insertCmd = new SqliteCommand(@"
+                                INSERT INTO Payments (RentalID, PaymentDate, Amount, ReceiptNumber)
+                                VALUES ($RentalID, $PaymentDate, $Amount, $ReceiptNumber)", connection, transaction);
+                                    insertCmd.Parameters.AddWithValue("$RentalID", rid);
+                                    insertCmd.Parameters.AddWithValue("$PaymentDate", zahlungsDatum);
+                                    insertCmd.Parameters.AddWithValue("$Amount", mietpreis);
+                                    insertCmd.Parameters.AddWithValue("$ReceiptNumber", string.IsNullOrWhiteSpace(belegNr) ? (object)DBNull.Value : belegNr);
+                                    insertCmd.ExecuteNonQuery();
+                                    imported++;
+                                }
+                                continue; // nächste Zahlung
+                            }
+                            else if (auswahl.SelectedRentalId.HasValue)
+                            {
+                                rentalId = auswahl.SelectedRentalId.Value;
+                            }
+                        }
+                        else if (auswahl.SkipPayment)
+                        {
+                            userSkipped++;
+                            details.Add($"Zeile {i + 1}: Zahlung vom Nutzer übersprungen.");
+                            continue; // Zahlung überspringen
+                        }
+                        else
+                        {
+                            userSkipped++;
+                            details.Add($"Zeile {i + 1}: Keine Auswahl getroffen, Zahlung übersprungen.");
+                            continue;
+                        }
+                    }
+                }
+
+                // Zahlung eintragen (Einzelfall)
+                if (rentalId.HasValue)
+                {
+                    var checkCmd = new SqliteCommand(
+                        "SELECT COUNT(*) FROM Payments WHERE RentalID = $RentalID AND ReceiptNumber = $ReceiptNumber",
+                        connection, transaction);
+                    checkCmd.Parameters.AddWithValue("$RentalID", rentalId.Value);
+                    checkCmd.Parameters.AddWithValue("$ReceiptNumber", string.IsNullOrWhiteSpace(belegNr) ? (object)DBNull.Value : belegNr);
+                    var exists = Convert.ToInt32(checkCmd.ExecuteScalar()) > 0;
+                    if (exists)
+                    {
+                        alreadyExists++;
+                        details.Add($"Zeile {i + 1}: Zahlung für Miete {rentalId.Value} mit Belegnummer {belegNr} existiert bereits.");
+                        continue;
+                    }
+
+                    var insertCmd = new SqliteCommand(@"
+                INSERT INTO Payments (RentalID, PaymentDate, Amount, ReceiptNumber)
+                VALUES ($RentalID, $PaymentDate, $Amount, $ReceiptNumber)", connection, transaction);
+                    insertCmd.Parameters.AddWithValue("$RentalID", rentalId.Value);
+                    insertCmd.Parameters.AddWithValue("$PaymentDate", zahlungsDatum);
+                    insertCmd.Parameters.AddWithValue("$Amount", betrag);
+                    insertCmd.Parameters.AddWithValue("$ReceiptNumber", string.IsNullOrWhiteSpace(belegNr) ? (object)DBNull.Value : belegNr);
+                    insertCmd.ExecuteNonQuery();
+                    imported++;
+                }
+            }
+
+            transaction.Commit();
+
+            // Statistik anzeigen
+            int total = lines.Length - 2;
+            int notImported = skipped + alreadyExists + noRental + userSkipped;
+            string message =
+                $"Import abgeschlossen.\n\n" +
+                $"Gesamt: {total}\n" +
+                $"Importiert: {imported}\n" +
+                $"Nicht importiert: {notImported}\n" +
+                $"- Davon bereits vorhanden: {alreadyExists}\n" +
+                $"- Keine Miete gefunden: {noRental}\n" +
+                $"- Ungültige Daten: {skipped}\n" +
+                $"- Vom Nutzer übersprungen: {userSkipped}\n\n" +
+                $"Details:\n" +
+                string.Join("\n", details.Take(30)) + (details.Count > 30 ? "\n... (weitere Details gekürzt)" : "");
+
+            MessageBox.Show(owner, message, "Import-Statistik", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
     }
 }
+public class OutstandingPaymentInfo
+{
+    public string CustomerName { get; set; }
+    public int CustomerId { get; set; }
+    public string Instrument { get; set; }
+    public decimal OffenerBetrag { get; set; }
+    public string LetzterZahlungsmonat { get; set; }
+    public decimal InsgesamtBezahlt { get; set; }
+    public int AnzahlZahlungen { get; set; }
+    public decimal ErwarteteZahlungen { get; set; } // NEU
+}
+
+public class PaymentInfo
+{
+    public string CustomerName { get; set; }
+    public int CustomerId { get; set; }
+    public string Instrument { get; set; }
+    public DateTime PaymentDate { get; set; }
+    public decimal Amount { get; set; }
+    public string ReceiptNumber { get; set; }
+}
+
+

@@ -1,7 +1,7 @@
 ﻿<Window x:Class="cvsimporter.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="CSV Importer" Height="450" Width="800">
+        Title="CSV Importer" Width="900"  Height="600">
     <Window.Resources>
         <!-- Style für TextBox mit Placeholder und sichtbarem Rahmen -->
         <Style x:Key="WatermarkTextBox" TargetType="TextBox">
@@ -57,6 +57,10 @@
                 <Button Content="Ausstehende Zahlungen" Click="btnShowOutstandingPayments_Click"/>
                 <Button Content="Alle Zahlungen anzeigen" Click="btnShowAllPayments_Click" Margin="10,0,0,0"/>
                 <Button Content="Kunden mit mehreren Instrumenten" Click="btnShowMultipleRentals_Click" Margin="10,0,0,0"/>
+                <Button Content="Alle Mieten anzeigen" Click="btnShowAllRentals_Click" Margin="10,0,0,0"/>
+                <Button Content="Zahlung manuell eintragen" Click="btnAddPayment_Click" Margin="10,0,0,0"/>
+                <Button Content="CSV Zahlung importieren" Click="btnImportCsvPayment_Click" Margin="10,0,0,0"/>
+                
             </StackPanel>
             <!-- Filterzeile mit Placeholder -->
             <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,5">
@@ -69,6 +73,8 @@
             </StackPanel>
             <DataGrid Name="dataGrid" AutoGenerateColumns="False" Grid.Row="2"
                       Margin="0"
+                      EnableRowVirtualization="True"
+                        EnableColumnVirtualization="True"
                       HorizontalAlignment="Stretch"
                       VerticalAlignment="Stretch">
                 <DataGrid.Columns>
@@ -81,6 +87,7 @@
                     <DataGridTextColumn Header="Erwartete Zahlungen" Binding="{Binding ErwarteteZahlungen, StringFormat={}{0:0.00} €}" />
                     <DataGridTextColumn Header="Offener Betrag" Binding="{Binding OffenerBetrag, StringFormat={}{0:0.00} €}" />
                     <DataGridTextColumn Header="Zahlungsdatum" Binding="{Binding PaymentDate, StringFormat={}{0:dd.MM.yyyy}}" />
+                    <DataGridTextColumn Header="Belegnummer" Binding="{Binding ReceiptNumber}" />
                     <DataGridTextColumn Header="Betrag" Binding="{Binding Amount, StringFormat={}{0:0.00} €}" />
                 </DataGrid.Columns>
             </DataGrid>

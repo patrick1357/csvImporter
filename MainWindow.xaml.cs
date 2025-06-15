@@ -1,11 +1,13 @@
-﻿using System.Windows;
+﻿using Microsoft.Data.Sqlite;
 using Microsoft.Win32;
-using Microsoft.Data.Sqlite;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
-using System.Collections.Generic;
 using System.Linq;
+using System.Reflection.PortableExecutable;
+using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Data;
 
 namespace cvsimporter
 {
@@ -19,12 +21,15 @@ namespace cvsimporter
         private List<OutstandingPaymentInfo> allOutstandingPayments = new();
         private List<PaymentInfo> allPayments = new();
         private List<MultipleRentalCustomer> multipleRentalCustomers = new();
+        private List<AllRentalInfo> allRentals = new();
         private bool showingAllPayments = false;
         private bool showingMultipleRentalCustomers = false;
+        private bool showingAllRentals = false;
         private string databasePath = "database.db"; // Standard-Datenbankdatei
 
         public MainWindow()
         {
+          
             InitializeComponent();
             DatabaseHelper.CheckOrCreateDatabase(databasePath);
 
@@ -60,6 +65,7 @@ namespace cvsimporter
             allOutstandingPayments = DatabaseHelper.GetOutstandingPayments(databasePath, bisDatum);
             showingAllPayments = false;
             showingMultipleRentalCustomers = false;
+            showingAllRentals = false;
             SetDataGridColumnsForOutstandingPayments();
             ApplyFilter();
         }
@@ -72,6 +78,7 @@ namespace cvsimporter
             allPayments = DatabaseHelper.GetAllPayments(databasePath);
             showingAllPayments = true;
             showingMultipleRentalCustomers = false;
+            showingAllRentals = false;
             SetDataGridColumnsForAllPayments();
             ApplyFilter();
         }
@@ -81,8 +88,38 @@ namespace cvsimporter
             multipleRentalCustomers = DatabaseHelper.GetCustomersWithMultipleRentals(databasePath);
             showingMultipleRentalCustomers = true;
             showingAllPayments = false;
+            showingAllRentals = false;
             SetDataGridColumnsForMultipleRentals();
             ApplyFilter();
+        }
+
+        private void btnShowAllRentals_Click(object sender, RoutedEventArgs e)
+        {
+            allRentals = DatabaseHelper.GetAllRentalsWithOutstanding(databasePath);
+            showingAllRentals = true;
+            showingAllPayments = false;
+            showingMultipleRentalCustomers = false;
+            SetDataGridColumnsForAllRentals();
+            dataGrid.ItemsSource = allRentals;
+        }
+
+        private void btnAddPayment_Click(object sender, RoutedEventArgs e)
+        {
+            var win = new ManualPaymentWindow(databasePath);
+            win.Owner = this;
+            win.ShowDialog();
+        }
+        private void btnImportCsvPayment_Click(object sender, RoutedEventArgs e)
+        {
+            var dlg = new Microsoft.Win32.OpenFileDialog
+            {
+                Filter = "CSV-Dateien (*.csv)|*.csv|Alle Dateien (*.*)|*.*"
+            };
+            if (dlg.ShowDialog(this) == true)
+            {
+                DatabaseHelper.ImportCsvPaymentsWithOrderNumber(this, databasePath, dlg.FileName);
+                MessageBox.Show("CSV-Import abgeschlossen.", "Info", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
         }
 
         private void SetDataGridColumnsForOutstandingPayments()
@@ -95,7 +132,14 @@ namespace cvsimporter
             dataGrid.Columns.Add(new DataGridTextColumn { Header = "Letzter Zahlungseingang", Binding = new System.Windows.Data.Binding("LetzterZahlungsmonat") });
             dataGrid.Columns.Add(new DataGridTextColumn { Header = "Insgesamt Bezahlt", Binding = new System.Windows.Data.Binding("InsgesamtBezahlt") { StringFormat = "0.00 €" } });
             dataGrid.Columns.Add(new DataGridTextColumn { Header = "Erwartete Zahlungen", Binding = new System.Windows.Data.Binding("ErwarteteZahlungen") { StringFormat = "0.00 €" } });
-            dataGrid.Columns.Add(new DataGridTextColumn { Header = "Offener Betrag", Binding = new System.Windows.Data.Binding("OffenerBetrag") { StringFormat = "0.00 €" } });
+            dataGrid.Columns.Add(new DataGridTextColumn
+            {
+                Header = "Betrag",
+                Binding = new System.Windows.Data.Binding("Amount")
+                {
+                    StringFormat = "{0:N2} €"
+                }
+            });
         }
 
         private void SetDataGridColumnsForAllPayments()
@@ -105,7 +149,15 @@ namespace cvsimporter
             dataGrid.Columns.Add(new DataGridTextColumn { Header = "Kundennr.", Binding = new System.Windows.Data.Binding("CustomerId") });
             dataGrid.Columns.Add(new DataGridTextColumn { Header = "Instrument", Binding = new System.Windows.Data.Binding("Instrument") });
             dataGrid.Columns.Add(new DataGridTextColumn { Header = "Zahlungsdatum", Binding = new System.Windows.Data.Binding("PaymentDate") { StringFormat = "dd.MM.yyyy" } });
-            dataGrid.Columns.Add(new DataGridTextColumn { Header = "Betrag", Binding = new System.Windows.Data.Binding("Amount") { StringFormat = "0.00 €" } });
+            dataGrid.Columns.Add(new DataGridTextColumn { Header = "Belegnummer", Binding = new System.Windows.Data.Binding("ReceiptNumber") }); // <-- Diese Zeile hinzufügen
+            dataGrid.Columns.Add(new DataGridTextColumn
+            {
+                Header = "Betrag",
+                Binding = new System.Windows.Data.Binding("Amount")
+                {
+                    StringFormat = "{0:N2} €"
+                }
+            });
         }
 
         private void SetDataGridColumnsForMultipleRentals()
@@ -114,6 +166,26 @@ namespace cvsimporter
             dataGrid.Columns.Add(new DataGridTextColumn { Header = "Kunde", Binding = new System.Windows.Data.Binding("CustomerName") });
             dataGrid.Columns.Add(new DataGridTextColumn { Header = "Kundennr.", Binding = new System.Windows.Data.Binding("CustomerId") });
             dataGrid.Columns.Add(new DataGridTextColumn { Header = "Anzahl Instrumente", Binding = new System.Windows.Data.Binding("InstrumentCount") });
+        }
+
+        private void SetDataGridColumnsForAllRentals()
+        {
+            dataGrid.Columns.Clear();
+            dataGrid.Columns.Add(new DataGridTextColumn { Header = "Kunde", Binding = new System.Windows.Data.Binding("CustomerName") });
+            dataGrid.Columns.Add(new DataGridTextColumn { Header = "Kundennr.", Binding = new System.Windows.Data.Binding("CustomerId") });
+            dataGrid.Columns.Add(new DataGridTextColumn { Header = "BestellNr", Binding = new System.Windows.Data.Binding("OrderNumber") });
+            dataGrid.Columns.Add(new DataGridTextColumn { Header = "Mietbeginn", Binding = new System.Windows.Data.Binding("RentalStart") { StringFormat = "dd.MM.yyyy" } });
+            dataGrid.Columns.Add(new DataGridTextColumn { Header = "Mietende", Binding = new System.Windows.Data.Binding("RentalEnd") { StringFormat = "dd.MM.yyyy" } });
+            dataGrid.Columns.Add(new DataGridCheckBoxColumn { Header = "Miete Beendet", Binding = new System.Windows.Data.Binding("IsEnded") });
+            dataGrid.Columns.Add(new DataGridTextColumn
+            {
+                Header = "Betrag",
+                Binding = new System.Windows.Data.Binding("Amount")
+                {
+                    StringFormat = "{0:N2} €"
+                }
+            });
+
         }
 
         private void FilterChanged(object sender, TextChangedEventArgs e)
@@ -135,6 +207,15 @@ namespace cvsimporter
             else if (showingMultipleRentalCustomers)
             {
                 var filtered = multipleRentalCustomers.AsEnumerable();
+                if (!string.IsNullOrWhiteSpace(filterCustomerName.Text))
+                    filtered = filtered.Where(x => x.CustomerName.Contains(filterCustomerName.Text, StringComparison.OrdinalIgnoreCase));
+                if (!string.IsNullOrWhiteSpace(filterCustomerId.Text))
+                    filtered = filtered.Where(x => x.CustomerId.ToString().Contains(filterCustomerId.Text, StringComparison.OrdinalIgnoreCase));
+                dataGrid.ItemsSource = filtered.ToList();
+            }
+            else if (showingAllRentals)
+            {
+                var filtered = allRentals.AsEnumerable();
                 if (!string.IsNullOrWhiteSpace(filterCustomerName.Text))
                     filtered = filtered.Where(x => x.CustomerName.Contains(filterCustomerName.Text, StringComparison.OrdinalIgnoreCase));
                 if (!string.IsNullOrWhiteSpace(filterCustomerId.Text))
